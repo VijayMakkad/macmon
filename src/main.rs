@@ -1,54 +1,71 @@
-pub mod app;
-pub mod debug;
-pub mod metrics;
-pub mod sources;
+#[macro_use]
+extern crate rocket;
 
-use app::App;
-use clap::{Parser, Subcommand};
+mod metrics;  // Import the `metrics` module
+mod sources;
+
+use rocket::serde::json::Json;
 use metrics::Sampler;
-use std::error::Error;
+use serde::Serialize;
+use rocket_cors::{AllowedOrigins, CorsOptions};
 
-#[derive(Debug, Subcommand)]
-enum Commands {
-  /// Print raw metrics data instead of TUI
-  Raw,
-
-  /// Print raw metrics data instead of TUI
-  Debug,
+// Define a structure for API responses
+#[derive(Serialize)]
+struct MetricsResponse {
+    cpu_power: f64,
+    gpu_power: f64,
+    mem_usage: u64,
+    mem_total: u64,
+    cpu_temp_avg: f32,
+    gpu_temp_avg: f32,
+    ecpu_usage: (u32, f32), // freq, percent_from_max
+    pcpu_usage: (u32, f32), // freq, percent_from_max
+    gpu_usage: (u32, f32),  // freq, percent_from_max
+    sys_power: f32,         // Watts
+    all_power: f32,         // Watts
 }
 
-/// Sudoless performance monitoring CLI tool for Apple Silicon processors
-/// https://github.com/vladkens/macmon
-#[derive(Debug, Parser)]
-#[command(version, verbatim_doc_comment)]
-struct Cli {
-  #[command(subcommand)]
-  command: Option<Commands>,
+// Function to get the metrics and return them in the API format
+fn fetch_metrics() -> Result<MetricsResponse, Box<dyn std::error::Error>> {
+    // Create a new Sampler
+    let mut sampler = Sampler::new()?;
+    
+    // Fetch the metrics
+    let metrics = sampler.get_metrics(1000)?;
 
-  /// Update interval in milliseconds
-  #[arg(short, long, default_value_t = 1000)]
-  interval: u64,
+    // Prepare response
+    Ok(MetricsResponse {
+        cpu_power: metrics.cpu_power as f64,
+        gpu_power: metrics.gpu_power as f64,
+        mem_usage: metrics.memory.ram_usage,
+        mem_total: metrics.memory.ram_total,
+        cpu_temp_avg: metrics.temp.cpu_temp_avg,
+        gpu_temp_avg: metrics.temp.gpu_temp_avg,
+        ecpu_usage: metrics.ecpu_usage,
+        pcpu_usage: metrics.pcpu_usage,
+        gpu_usage: metrics.gpu_usage,
+        sys_power: metrics.sys_power,
+        all_power: metrics.all_power,
+    })
 }
 
-fn main() -> Result<(), Box<dyn Error>> {
-  let args = Cli::parse();
-  let msec = args.interval.max(100);
-
-  match &args.command {
-    Some(Commands::Raw) => {
-      let mut sampler = Sampler::new()?;
-
-      loop {
-        let metrics = sampler.get_metrics(msec)?;
-        println!("{:?}", metrics);
-      }
+// Rocket route to expose metrics as JSON
+#[get("/metrics")]
+fn metrics_api() -> Result<Json<MetricsResponse>, rocket::http::Status> {
+    match fetch_metrics() {
+        Ok(response) => Ok(Json(response)),
+        Err(_) => Err(rocket::http::Status::InternalServerError),  // Return an internal server error if anything fails
     }
-    Some(Commands::Debug) => debug::print_debug()?,
-    _ => {
-      let mut app = App::new()?;
-      app.run_loop(msec)?;
-    }
-  }
+}
 
-  Ok(())
+// Launch the Rocket server
+#[launch]
+fn rocket() -> _ {
+  let cors = CorsOptions::default()
+    .to_cors()
+    .expect("CorsOptions::default() failed");
+
+  rocket::build()
+    .mount("/", routes![metrics_api])
+    .attach(cors)
 }
